@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -20,6 +20,12 @@ import {
 } from "@/components/ui/select";
 import { addManualHolding, BROKERS } from "@/lib/manual-holdings";
 
+interface SearchResult {
+  code: string;
+  name: string;
+  market: string;
+}
+
 interface Props {
   onAdded: () => void;
 }
@@ -31,25 +37,79 @@ export function AddHoldingDialog({ onAdded }: Props) {
   const [name, setName] = useState("");
   const [quantity, setQuantity] = useState("");
   const [avgPrice, setAvgPrice] = useState("");
-  const [searching, setSearching] = useState(false);
-  const [searchResult, setSearchResult] = useState<string | null>(null);
 
-  const handleSymbolSearch = async () => {
-    if (!symbol.trim()) return;
-    setSearching(true);
-    setSearchResult(null);
+  // 검색 관련
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [showResults, setShowResults] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 현재가 조회
+  const [priceInfo, setPriceInfo] = useState<string | null>(null);
+
+  // 검색어 변경 시 debounce 검색
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    if (searchQuery.trim().length < 1) {
+      setSearchResults([]);
+      setShowResults(false);
+      return;
+    }
+
+    debounceRef.current = setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const res = await fetch(`/api/kis/search?q=${encodeURIComponent(searchQuery.trim())}`);
+        const data = await res.json();
+        setSearchResults(data.results || []);
+        setShowResults(true);
+      } catch {
+        setSearchResults([]);
+      } finally {
+        setSearchLoading(false);
+      }
+    }, 300);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [searchQuery]);
+
+  // 클릭 외부 닫기
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setShowResults(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  const selectStock = async (stock: SearchResult) => {
+    setSymbol(stock.code);
+    setName(stock.name);
+    setSearchQuery(`${stock.name} (${stock.code})`);
+    setShowResults(false);
+
+    // 현재가 자동 조회
+    setPriceInfo("조회 중...");
     try {
-      const res = await fetch(`/api/kis/price?symbol=${symbol.trim()}`);
+      const res = await fetch(`/api/kis/price?symbol=${stock.code}`);
       const data = await res.json();
       if (data.success && data.data) {
-        setSearchResult(`현재가: ₩${parseInt(data.data.stck_prpr).toLocaleString()}`);
+        const price = parseInt(data.data.stck_prpr);
+        const change = data.data.prdy_ctrt;
+        const sign = parseFloat(change) >= 0 ? "+" : "";
+        setPriceInfo(`현재가: ₩${price.toLocaleString()} (${sign}${change}%)`);
       } else {
-        setSearchResult("종목을 찾을 수 없습니다");
+        setPriceInfo("현재가 조회 불가");
       }
     } catch {
-      setSearchResult("조회 실패");
-    } finally {
-      setSearching(false);
+      setPriceInfo("조회 실패");
     }
   };
 
@@ -70,7 +130,8 @@ export function AddHoldingDialog({ onAdded }: Props) {
     setName("");
     setQuantity("");
     setAvgPrice("");
-    setSearchResult(null);
+    setSearchQuery("");
+    setPriceInfo(null);
     setOpen(false);
     onAdded();
   };
@@ -89,7 +150,7 @@ export function AddHoldingDialog({ onAdded }: Props) {
         <div className="space-y-4 pt-2">
           {/* 증권사 */}
           <div className="space-y-1.5">
-            <Label htmlFor="broker">증권사</Label>
+            <Label>증권사</Label>
             <Select value={broker} onValueChange={(v) => setBroker(v || "")}>
               <SelectTrigger>
                 <SelectValue placeholder="증권사 선택" />
@@ -104,48 +165,79 @@ export function AddHoldingDialog({ onAdded }: Props) {
             </Select>
           </div>
 
-          {/* 종목코드 + 검색 */}
-          <div className="space-y-1.5">
-            <Label htmlFor="symbol">종목코드</Label>
-            <div className="flex gap-2">
+          {/* 종목 검색 */}
+          <div className="space-y-1.5" ref={searchRef}>
+            <Label>종목 검색</Label>
+            <div className="relative">
               <Input
-                id="symbol"
-                placeholder="005930"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                className="flex-1"
+                placeholder="종목명 또는 종목코드 입력 (예: 삼성전자, 005930)"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  // 직접 입력 시 선택 해제
+                  if (symbol) {
+                    setSymbol("");
+                    setName("");
+                    setPriceInfo(null);
+                  }
+                }}
+                onFocus={() => {
+                  if (searchResults.length > 0) setShowResults(true);
+                }}
               />
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleSymbolSearch}
-                disabled={searching || !symbol.trim()}
-              >
-                {searching ? "..." : "조회"}
-              </Button>
-            </div>
-            {searchResult && (
-              <p className="text-xs text-gray-500">{searchResult}</p>
-            )}
-          </div>
+              {searchLoading && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+                </div>
+              )}
 
-          {/* 종목명 */}
-          <div className="space-y-1.5">
-            <Label htmlFor="name">종목명</Label>
-            <Input
-              id="name"
-              placeholder="삼성전자"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
+              {/* 검색 결과 드롭다운 */}
+              {showResults && searchResults.length > 0 && (
+                <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                  {searchResults.map((stock) => (
+                    <button
+                      key={stock.code}
+                      type="button"
+                      className="w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors flex items-center justify-between border-b border-gray-50 last:border-0"
+                      onClick={() => selectStock(stock)}
+                    >
+                      <div>
+                        <span className="text-sm font-medium text-gray-900">
+                          {stock.name}
+                        </span>
+                        <span className="text-xs text-gray-400 ml-2">{stock.code}</span>
+                      </div>
+                      <span className="text-[10px] text-gray-400 bg-gray-100 rounded px-1.5 py-0.5">
+                        {stock.market}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {showResults && searchQuery.trim().length >= 1 && searchResults.length === 0 && !searchLoading && (
+                <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg px-3 py-4 text-center text-sm text-gray-400">
+                  검색 결과가 없습니다
+                </div>
+              )}
+            </div>
+
+            {/* 선택된 종목 정보 */}
+            {symbol && (
+              <div className="text-xs text-gray-500 bg-gray-50 rounded px-2.5 py-1.5 flex items-center justify-between">
+                <span>
+                  ✅ {name} ({symbol})
+                </span>
+                {priceInfo && <span>{priceInfo}</span>}
+              </div>
+            )}
           </div>
 
           {/* 수량 & 평균단가 */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="quantity">보유수량</Label>
+              <Label>보유수량</Label>
               <Input
-                id="quantity"
                 type="number"
                 placeholder="100"
                 value={quantity}
@@ -153,9 +245,8 @@ export function AddHoldingDialog({ onAdded }: Props) {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="avgPrice">매수평균가</Label>
+              <Label>매수평균가</Label>
               <Input
-                id="avgPrice"
                 type="number"
                 placeholder="65000"
                 value={avgPrice}
